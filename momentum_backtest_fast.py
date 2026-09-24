@@ -62,6 +62,9 @@ RSRS_INDEX = '000300.SH'
 # 止损线
 STOP_LOSS_RATIO = -0.15
 
+# 调仓委托价格：'prev_close' 前一交易日收盘价；'open' 当日开盘价（原逻辑）
+ORDER_PRICE_MODE = 'prev_close'
+
 # 预加载时在回测起点之前多取的自然日（需覆盖 LOOKBACK_DAYS + 10 根以上的交易日）
 PRELOAD_BUFFER_DAYS = 90
 
@@ -394,6 +397,29 @@ def get_open_price(C, stock, bar_date, pos):
 		return 0.0
 
 
+def get_prev_close(C, stock, bar_date, pos):
+	"""前一交易日收盘价；股票不在预加载范围时回退到接口查询"""
+	if pos >= 1:
+		price = get_field(g.close, stock, pos - 1)
+		if not np.isnan(price):
+			return float(price)
+	try:
+		data = C.get_market_data_ex(
+			['close'], [stock], period='1d', end_time=bar_date, count=2,
+			dividend_type='none', fill_data=True, subscribe=False)
+		df = data[stock]
+		return float(df['close'].iloc[-2]) if len(df) >= 2 else 0.0
+	except Exception:
+		return 0.0
+
+
+def get_order_price(C, stock, bar_date, pos):
+	"""调仓委托价格，由 ORDER_PRICE_MODE 决定"""
+	if ORDER_PRICE_MODE == 'prev_close':
+		return get_prev_close(C, stock, bar_date, pos)
+	return get_open_price(C, stock, bar_date, pos)
+
+
 def get_limit_ratio(stock):
 	"""
 	根据代码前缀确定涨跌停幅度：
@@ -686,7 +712,7 @@ def adjust_position(stock, signal, C, bar_date, pos):
 		for s, vol in current_holdings.items():
 			msg = f'SELL信号 清仓 {s}'
 			print(f'[调仓] {msg}')
-			passorder(24, 1101, g.account, s, 11, get_open_price(C, s, bar_date, pos), vol,
+			passorder(24, 1101, g.account, s, 11, get_order_price(C, s, bar_date, pos), vol,
 					  STRATEGY_NAME, 1, msg, C)
 		return
 
@@ -699,7 +725,7 @@ def adjust_position(stock, signal, C, bar_date, pos):
 	for s, vol in current_holdings.items():
 		msg = f'切换标的 卖出 {s}'
 		print(f'[调仓] {msg}')
-		passorder(24, 1101, g.account, s, 11, get_open_price(C, s, bar_date, pos), vol,
+		passorder(24, 1101, g.account, s, 11, get_order_price(C, s, bar_date, pos), vol,
 				  STRATEGY_NAME, 1, msg, C)
 
 	acc_info = get_trade_detail_data(g.account, g.acct_type, 'account')
@@ -709,6 +735,7 @@ def adjust_position(stock, signal, C, bar_date, pos):
 	available_cash = int(acc_info[0].m_dAvailable)
 
 	current_price, limit_up, limit_down, low_price = get_price_and_limits(stock, pos)
+	current_price = get_order_price(C, stock, bar_date, pos)
 	if current_price <= 0:
 		print(f'[调仓] {stock} 价格异常: {current_price}')
 		return
