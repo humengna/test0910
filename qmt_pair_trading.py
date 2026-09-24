@@ -167,9 +167,11 @@ def change_positions(new_state, ContextInfo, today):
 def get_prices(ContextInfo, today):
     field = 'open' if g.use_open_price else 'close'
     codes = [g.security1, g.security2]
+    # 回测撮合使用主图的复权方式，下单价必须同口径，否则会超出当根 K 线
+    # 最高最低价而被改成最新价成交，所以这里用 'follow'（跟随主图）
     data = ContextInfo.get_market_data_ex(
-        [field], codes, period='1d', end_time=today, count=1,
-        dividend_type='none', fill_data=True, subscribe=False)
+        [field, 'high', 'low'], codes, period='1d', end_time=today, count=1,
+        dividend_type='follow', fill_data=True, subscribe=False)
     prices = {}
     for code in codes:
         df = data.get(code)
@@ -178,6 +180,8 @@ def get_prices(ContextInfo, today):
         px = float(df[field].iloc[-1])
         if not px > 0:
             return None
+        # 保险：限制在当根 K 线最高最低价之间
+        px = min(max(px, float(df['low'].iloc[-1])), float(df['high'].iloc[-1]))
         prices[code] = px
     return prices
 
