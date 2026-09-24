@@ -45,7 +45,7 @@ def set_params():
     g.oos_start = '20240101'          # 样本外开始，'' 表示不做样本外验证
     g.oos_end = ''                    # 样本外结束，'' 表示到最新
     # ---- 与交易策略一致的参数 ----
-    g.window = 120                    # z-score 窗口，同 qmt_pair_trading.py 的 g.test_days
+    g.window = 250                    # z-score 窗口，同 qmt_pair_trading.py 的 g.test_days
     g.fee = 0.001                     # 模拟回测单边换手费率
     # ---- 筛选条件 ----
     g.min_corr = 0.8                  # 对数价格最低相关系数

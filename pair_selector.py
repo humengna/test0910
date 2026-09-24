@@ -8,7 +8,7 @@
   3. 两两计算对数价格相关性，保留 >= --min-corr 的组合
   4. Engle-Granger 协整检验（两个方向都试，取 p 值小的方向）
   5. 估计回归系数 beta（P2 = alpha + beta * P1）、价差半衰期、价差波动
-  6. 用 qmt_pair_trading.py 相同的规则（120 日 z-score，±1 进场，穿越 0 恢复 p/q）
+  6. 用 qmt_pair_trading.py 相同的规则（250 日 z-score，±1 进场，穿越 0 恢复 p/q）
      模拟回测，计入手续费；可指定样本外区间验证
   7. 输出结果 CSV，并打印可直接填入 QMT 策略的参数
 
@@ -161,7 +161,7 @@ def half_life(resid):
 # 模拟 qmt_pair_trading.py 的交易规则
 # ============================================================
 def simulate(close1, close2, open1, open2, raw1, raw2, beta, start_i, end_i,
-             window=120, p=0.5, q=0.5, fee=0.001):
+             window=250, p=0.5, q=0.5, fee=0.001):
     """
     close/open/raw 为对齐后的 numpy 数组。第 t 天用 [t-window, t-1] 的收盘价算 z，
     按第 t 天开盘价调仓。fee 为单边换手费率（佣金+印花税+滑点的平均）。
@@ -258,7 +258,7 @@ def main():
     ap.add_argument('--end', required=True, help='样本内结束日期')
     ap.add_argument('--oos-start', help='样本外开始日期（可选）')
     ap.add_argument('--oos-end', help='样本外结束日期（默认到数据末尾）')
-    ap.add_argument('--window', type=int, default=120, help='z-score 窗口，同 g.test_days')
+    ap.add_argument('--window', type=int, default=250, help='z-score 窗口，同 g.test_days')
     ap.add_argument('--min-corr', type=float, default=0.8, help='对数价格最低相关系数')
     ap.add_argument('--max-pvalue', type=float, default=0.05, help='协整检验最大 p 值')
     ap.add_argument('--min-half-life', type=float, default=2, help='最短半衰期（天）')

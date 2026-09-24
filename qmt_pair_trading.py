@@ -5,7 +5,7 @@ QMT 版本：配对交易（伊利股份 600887 / 招商银行 600036）
 （原文：https://www.joinquant.com/post/1810 「配对交易：用协整做搬砖」）
 
 策略逻辑（与原聚宽代码保持一致）：
-  1. 取两只股票过去 test_days(120) 个交易日收盘价（不含当天）
+  1. 取两只股票过去 test_days(250) 个交易日收盘价（不含当天）
   2. 价差序列 spread = P2 - ratio * P1，计算最新一天价差的 z-score
   3. z >  1          -> 'buy1'  : 清仓股票2，全仓股票1
      z < -1          -> 'buy2'  : 清仓股票1，全仓股票2
@@ -46,7 +46,7 @@ def set_params():
     g.regression_ratio = 1.000     # 回归系数
     g.p = 0.5                      # 股票1默认仓位
     g.q = 0.5                      # 股票2默认仓位
-    g.test_days = 120              # 计算 z-score 的天数
+    g.test_days = 250              # 计算 z-score 的天数
     # 成交价：True 用当日开盘价下单（与聚宽日线回测 handle_data 开盘成交一致）
     #        False 用最新价（回测中即当日收盘价）
     g.use_open_price = True
