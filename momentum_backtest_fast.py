@@ -62,6 +62,9 @@ RSRS_INDEX = '000300.SH'
 # 止损线
 STOP_LOSS_RATIO = -0.15
 
+# 过滤前一交易日一字涨停的股票（只用前一日数据，无未来函数）
+FILTER_PREV_YIZI_LIMIT_UP = True
+
 # 预加载时在回测起点之前多取的自然日（需覆盖 LOOKBACK_DAYS + 10 根以上的交易日）
 PRELOAD_BUFFER_DAYS = 90
 
@@ -269,6 +272,7 @@ def preload_all(C, bar_date):
 	for i, stock in enumerate(stocks):
 		static_ok[i] = static_filter(C, stock)
 	g.static_ok = static_ok
+	g.limit_ratio = np.array([get_limit_ratio(s) for s in stocks], dtype=float)
 
 	# ---------- RSRS 全序列 ----------
 	g.rsrs = precompute_rsrs(C, end_time)
@@ -513,10 +517,27 @@ def print_trade_info_backtest(C, bar_date, pos):
 def get_stock_pool(pos):
 	"""
 	返回布尔掩码（对应 g.stocks）：静态过滤通过 + 当日有行情 + 当日未停牌
+	                              + 前一交易日不是一字涨停
 	"""
 	has_data = ~np.isnan(g.close[pos])
 	not_suspend = g.suspend[pos] != 1
-	return g.static_ok & has_data & not_suspend
+	mask = g.static_ok & has_data & not_suspend
+	if FILTER_PREV_YIZI_LIMIT_UP and pos >= 1:
+		mask &= ~prev_yizi_limit_up(pos)
+	return mask
+
+
+def prev_yizi_limit_up(pos):
+	"""
+	前一交易日是否一字涨停：当日最低价 >= 涨停价（最低价都在涨停价，说明全天封死在涨停）。
+	涨停价 = round(昨收 * (1 + 涨停幅度), 2)，幅度按代码前缀：创业板/科创板 20%，主板 10%。
+	前一日停牌（suspendFlag == 1）不算。
+	"""
+	p = pos - 1
+	with np.errstate(invalid='ignore'):
+		limit_up = np.round(g.pre_close[p] * (1 + g.limit_ratio), 2)
+		yizi = (g.pre_close[p] > 0) & (g.low[p] >= limit_up - 1e-6) & (g.suspend[p] != 1)
+	return yizi
 
 
 # ============================================================
