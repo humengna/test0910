@@ -15,6 +15,10 @@ A¹É¹ÉÆ±²ßÂÔ [»Ø²â°æ - ÌáËÙ°æ]£ºÈÈÃÅ¸ÅÄî³Ø + ¶ÔÊıÏßĞÔ»Ø¹é¶¯Á¿´ò·Ö + RSRSĞŞÕı±ê×¼·
      Ô­À´Ã¿¸ù bar ×ö 600 ´Î np.polyfit¡£
   5. È¥µôÃ¿¸ù bar ´òÓ¡È«²¿ sorted_stocks£¨¼¸Ç§Ìõ£©µÄÈÕÖ¾£¬¿ØÖÆÌ¨Êä³ö±¾Éí·Ç³£Âı¡£
      ĞèÒªÏêÏ¸ÈÕÖ¾Ê±°Ñ VERBOSE ÉèÎª True¡£
+
+°å¿é·Ö¿ª£º
+  Ö÷°å Óë ´´Òµ°å+¿Æ´´°å ×÷ÎªÁ½¸ö¶ÀÁ¢µÄ×é£¨¼û BOARD_GROUPS£©£¬¸÷×ÔÑ¡µÚ1Ãû¡¢¸÷×ÔÔñÊ±¡¢
+  ¸÷×Ô¹ÜÀí±¾°å¿é³Ö²Ö£¬×Ê½ğ°´Õ¼±È·ÖÅä£»Ö»±£ÁôÒ»×é¼´¿Éµ¥¶À»Ø²âÄ³¸ö°å¿é¡£
 """
 
 import time
@@ -62,6 +66,16 @@ RSRS_INDEX = '000300.SH'
 # Ö¹ËğÏß
 STOP_LOSS_RATIO = -0.15
 
+# °å¿é·Ö×é£ºÃ¿×é¶ÀÁ¢Ñ¡¹É¡¢¶ÀÁ¢ÔñÊ±¡¢¶ÀÁ¢³Ö²Ö£¬ÖµÎª¸Ã×é×Ê½ğÕ¼±È
+#   'main'     Ö÷°å£¨»¦ÊĞ 60xxxx¡¢ÉîÊĞ 000/001/002/003£©
+#   'gem_star' ´´Òµ°å£¨300/301£©+ ¿Æ´´°å£¨688/689£©
+# Ö»»Ø²âÄ³Ò»¸ö°å¿é£ºÖ»±£ÁôÒ»Ïî²¢ÉèÎª 1.0£¬ÀıÈç BOARD_GROUPS = {'main': 1.0}
+BOARD_GROUPS = {
+	'main': 0.5,
+	'gem_star': 0.5,
+}
+BOARD_NAMES = {'main': 'Ö÷°å', 'gem_star': '´´Òµ°å+¿Æ´´°å'}
+
 # Ô¤¼ÓÔØÊ±ÔÚ»Ø²âÆğµãÖ®Ç°¶àÈ¡µÄ×ÔÈ»ÈÕ£¨Ğè¸²¸Ç LOOKBACK_DAYS + 10 ¸ùÒÔÉÏµÄ½»Ò×ÈÕ£©
 PRELOAD_BUFFER_DAYS = 90
 
@@ -81,8 +95,8 @@ def init(C):
 	"""
 	g.account = "testS"	   # »Ø²âÄ£ÄâÕËºÅ
 	g.acct_type = "STOCK"	 # ¹ÉÆ±ÕËºÅ
-	g.stock_df = {}		   # ½ü5ÈÕ¶¯Á¿·ÖÊıĞòÁĞ
-	g.today_target = None	 # ½ñÈÕÄ¿±ê¹ÉÆ±
+	g.stock_df = {}		   # ¸÷°å¿é×éÄ¿±ê¹ÉµÄ½ü5ÈÕ¶¯Á¿·ÖÊıĞòÁĞ
+	g.today_target = {}	   # ¸÷°å¿é×é½ñÈÕÄ¿±ê¹ÉÆ±
 	g.bar_count = 0		   # ÒÑ´¦Àí bar ¼ÆÊı
 	g.loaded = False		  # ĞĞÇéÊÇ·ñÒÑÔ¤¼ÓÔØ
 	g.name_cache = {}		 # ¹ÉÆ±Ãû³Æ»º´æ
@@ -91,6 +105,7 @@ def init(C):
 	print(f'  »Ø²âÕËºÅ: {g.account}, ÀàĞÍ: {g.acct_type}')
 	print(f'  ¸ÅÄî°å¿éÊı: {len(CONCEPT_SECTORS)}')
 	print(f'  ¶¯Á¿»Ø¿´: {LOOKBACK_DAYS}Ìì, Ö¹ËğÏß: {STOP_LOSS_RATIO:.0%}')
+	print(f'  °å¿é·Ö×é: {[(BOARD_NAMES.get(k, k), w) for k, w in BOARD_GROUPS.items()]}')
 
 
 def handlebar(C):
@@ -123,43 +138,50 @@ def handlebar(C):
 	print('=' * 60)
 
 	# ============================================================
-	# ¢Ù Ö÷Ñ¡¹É + Ö÷µ÷²Ö£¨µÈ¼ÛÓÚ 09:31 my_trade£©
+	# ¢Ù ¸÷°å¿é×é·Ö±ğÑ¡¹É + ÔñÊ±£¬È»ºóÍ³Ò»µ÷²Ö£¨µÈ¼ÛÓÚ 09:31 my_trade£©
 	# ============================================================
 	# ²½Öè1£º¹¹½¨¹ÉÆ±³Ø£¨²¼¶ûÑÚÂë£¬¶ÔÓ¦ g.stocks ¸÷ÁĞ£©
-	pool_mask = get_stock_pool(pos)
-	pool_size = int(pool_mask.sum())
-	if pool_size == 0:
-		print('[»Ø²â] ¹ÉÆ±³ØÎª¿Õ£¬Ìø¹ı½ñÈÕ')
-		return
-	print(f'[»Ø²â] ²½Öè1 - ¹ÉÆ±³Ø: {pool_size} Ö»')
+	base_pool = get_stock_pool(pos)
 
-	# ²½Öè2£º¶¯Á¿´ò·ÖÑ¡¹É£¬È¡µÚ1Ãû
-	target_stock = get_rank(pool_mask, pos)
-	if target_stock is None:
-		print('[»Ø²â] ²½Öè2 - Î´Ñ¡³öÄ¿±ê¹ÉÆ±')
-		return
-	print(f'[»Ø²â] ²½Öè2 - Ä¿±ê: {target_stock} {get_name(C, target_stock)}')
+	decisions = {}
+	for group in BOARD_GROUPS:
+		name = BOARD_NAMES.get(group, group)
+		pool_mask = base_pool & g.board_mask[group]
+		pool_size = int(pool_mask.sum())
+		if pool_size == 0:
+			print(f'[{name}] ¹ÉÆ±³ØÎª¿Õ£¬½ñÈÕ²»µ÷²Ö')
+			continue
+		print(f'[{name}] ²½Öè1 - ¹ÉÆ±³Ø: {pool_size} Ö»')
 
-	# ²½Öè3£º¼ÆËã½ü5ÈÕ¶¯Á¿·ÖÊıĞòÁĞ
-	g.stock_df = rank_stock_change(target_stock, pos)
-	scores = g.stock_df.get(target_stock, [])
-	print(f'[»Ø²â] ²½Öè3 - ½ü5ÈÕ¶¯Á¿·ÖÊı: {[round(s, 4) for s in scores]}')
+		# ²½Öè2£º¶¯Á¿´ò·ÖÑ¡¹É£¬È¡µÚ1Ãû
+		target_stock = get_rank(pool_mask, pos, name)
+		if target_stock is None:
+			print(f'[{name}] ²½Öè2 - Î´Ñ¡³öÄ¿±ê¹ÉÆ±')
+			continue
+		print(f'[{name}] ²½Öè2 - Ä¿±ê: {target_stock} {get_name(C, target_stock)}')
 
-	# ²½Öè4£º¹ıÂËºòÑ¡¹É£¨µøÍ£¡¢Í£ÅÆ£©
-	target_stock = filter_target(target_stock, pos)
-	if target_stock is None:
-		print('[»Ø²â] ²½Öè4 - Ä¿±ê¹ÉÆ±±»¹ıÂË')
-		return
-	g.today_target = target_stock
-	print(f'[»Ø²â] ²½Öè4 - ¹ıÂËÍ¨¹ı: {target_stock}')
+		# ²½Öè3£º¼ÆËã½ü5ÈÕ¶¯Á¿·ÖÊıĞòÁĞ
+		g.stock_df[group] = rank_stock_change(target_stock, pos)
+		scores = g.stock_df[group].get(target_stock, [])
+		print(f'[{name}] ²½Öè3 - ½ü5ÈÕ¶¯Á¿·ÖÊı: {[round(s, 4) for s in scores]}')
 
-	# ²½Öè5£º¼ÆËã×ÛºÏÔñÊ±ĞÅºÅ
-	signal = get_timing_signal(target_stock, bar_date)
-	print(f'[»Ø²â] ²½Öè5 - ÔñÊ±ĞÅºÅ: {signal}')
+		# ²½Öè4£º¹ıÂËºòÑ¡¹É£¨µøÍ£¡¢Í£ÅÆ£©
+		target_stock = filter_target(target_stock, pos)
+		if target_stock is None:
+			print(f'[{name}] ²½Öè4 - Ä¿±ê¹ÉÆ±±»¹ıÂË')
+			continue
+		g.today_target[group] = target_stock
+		print(f'[{name}] ²½Öè4 - ¹ıÂËÍ¨¹ı: {target_stock}')
 
-	# ²½Öè6£ºÖ´ĞĞµ÷²Ö
-	adjust_position(target_stock, signal, C, bar_date, pos)
-	print('[»Ø²â] ²½Öè6 - µ÷²ÖÖ´ĞĞÍê±Ï')
+		# ²½Öè5£º¼ÆËãÔñÊ±ĞÅºÅ
+		signal = get_timing_signal(target_stock, group, bar_date)
+		print(f'[{name}] ²½Öè5 - ÔñÊ±ĞÅºÅ: {signal}')
+		decisions[group] = (target_stock, signal)
+
+	# ²½Öè6£ºÖ´ĞĞµ÷²Ö£¨ÏÈÂôºóÂò£¬¸÷×é°´×Ê½ğÕ¼±ÈÂòÈë£©
+	if decisions:
+		adjust_position(decisions, C, bar_date, pos)
+		print('[»Ø²â] ²½Öè6 - µ÷²ÖÖ´ĞĞÍê±Ï')
 
 	# ============================================================
 	# ¢Ú Ö¹Ëğ¼ì²é£¨µÈ¼ÛÓÚ 14:50 check_lose£©
@@ -269,6 +291,10 @@ def preload_all(C, bar_date):
 	for i, stock in enumerate(stocks):
 		static_ok[i] = static_filter(C, stock)
 	g.static_ok = static_ok
+
+	# ---------- °å¿é¹éÊô ----------
+	boards = np.array([board_of(s) for s in stocks])
+	g.board_mask = {grp: boards == grp for grp in BOARD_GROUPS}
 
 	# ---------- RSRS È«ĞòÁĞ ----------
 	g.rsrs = precompute_rsrs(C, end_time)
@@ -392,6 +418,18 @@ def get_open_price(C, stock, bar_date, pos):
 		return float(data[stock]['open'].iloc[-1])
 	except Exception:
 		return 0.0
+
+
+def board_of(stock):
+	"""¹ÉÆ±ËùÊô°å¿é×é£º'main' Ö÷°å / 'gem_star' ´´Òµ°å+¿Æ´´°å / 'other' ÆäËû£¨Èç±±½»Ëù£©"""
+	code, _, market = stock.partition('.')
+	if market.upper() == 'BJ':
+		return 'other'
+	if code.startswith(('300', '301', '688', '689')):
+		return 'gem_star'
+	if code.startswith(('60', '000', '001', '002', '003')):
+		return 'main'
+	return 'other'
 
 
 def get_limit_ratio(stock):
@@ -542,7 +580,7 @@ def momentum_scores(log_window):
 	return np.where(r2 <= 0, 0.0, score)
 
 
-def get_rank(pool_mask, pos):
+def get_rank(pool_mask, pos, name=''):
 	"""
 	Ê¹ÓÃ bar Ö®Ç°µÄ LOOKBACK_DAYS ¸ùÊÕÅÌ¼Û´ò·Ö£¨²»º¬µ±Ç° bar£©£¬Ñ¡µÚ1Ãû
 	"""
@@ -563,8 +601,8 @@ def get_rank(pool_mask, pos):
 	order = np.argsort(-scores, kind='stable')
 	top = [(g.stocks[cols[k]], round(float(scores[k]), 4)) for k in order[:3]]
 	if VERBOSE:
-		print('sorted_stocks', [(g.stocks[cols[k]], float(scores[k])) for k in order])
-	print(f'[get_rank] Top3: {top}')
+		print(f'[{name}] sorted_stocks', [(g.stocks[cols[k]], float(scores[k])) for k in order])
+	print(f'[get_rank][{name}] Top3: {top}')
 	return g.stocks[cols[order[0]]]
 
 
@@ -621,7 +659,7 @@ def filter_target(stock, pos):
 	if np.isnan(pre_close):
 		pre_close = last_close
 
-	limit_down = round(pre_close * 0.9, 2)
+	limit_down = round(pre_close * (1 - get_limit_ratio(stock)), 2)
 	if last_close <= limit_down:
 		print(f'[filter_target] {stock} µøÍ£ ÊÕÅÌ:{last_close} µøÍ£¼Û:{limit_down}')
 		return None
@@ -633,7 +671,7 @@ def filter_target(stock, pos):
 # ²½Öè5£º¼ÆËã×ÛºÏÔñÊ±ĞÅºÅ get_timing_signal()
 # ============================================================
 
-def get_timing_signal(stock, bar_date):
+def get_timing_signal(stock, group, bar_date):
 	"""
 	ÔñÊ±ĞÅºÅ£º
 	  RSRS ½ö¼ÇÂ¼£¬²»½éÈë¾ö²ß
@@ -645,7 +683,7 @@ def get_timing_signal(stock, bar_date):
 	else:
 		print('[ÔñÊ±] RSRS Êı¾İ²»×ã')
 
-	scores = g.stock_df.get(stock, [])
+	scores = g.stock_df.get(group, {}).get(stock, [])
 	if len(scores) < 1:
 		return 'KEEP'
 
@@ -666,11 +704,13 @@ def get_timing_signal(stock, bar_date):
 # ²½Öè6£ºÖ´ĞĞµ÷²Ö adjust_position()
 # ============================================================
 
-def adjust_position(stock, signal, C, bar_date, pos):
+def adjust_position(decisions, C, bar_date, pos):
 	"""
-	µ÷²Ö£º
-	  SELL£ºÇå²Ö
-	  BUY/KEEP£º³Ö²Ö²»ÊÇÄ¿±ê¹É ¡ú »»²Ö£»ÊÇÄ¿±ê¹É ¡ú ³ÖÓĞ
+	µ÷²Ö£¬decisions = {°å¿é×é: (Ä¿±ê¹É, ĞÅºÅ)}£¬Ã¿×éÖ»¹ÜÀí±¾°å¿éµÄ³Ö²Ö£º
+	  SELL£ºÇåµô±¾×é³Ö²Ö
+	  BUY/KEEP£º±¾×é³Ö²Ö²»ÊÇÄ¿±ê¹É ¡ú »»²Ö£»ÊÇÄ¿±ê¹É ¡ú ³ÖÓĞ
+	ÏÈÖ´ĞĞËùÓĞÂô³ö£¬ÔÙ°´ BOARD_GROUPS ×Ê½ğÕ¼±ÈÂòÈë¡£
+	×éÔ¤Ëã = ×Ü×Ê²ú(°´½ñÈÕ¿ªÅÌ¼Û) * Õ¼±È£¬ÇÒ²»³¬¹ıµ±Ç°¿ÉÓÃ×Ê½ğ¡£
 	"""
 	holdings = get_trade_detail_data(g.account, g.acct_type, 'position')
 	current_holdings = {}
@@ -679,53 +719,76 @@ def adjust_position(stock, signal, C, bar_date, pos):
 		vol = p.m_nCanUseVolume
 		if vol > 0:
 			current_holdings[s] = vol
-
 	print(f'[µ÷²Ö] µ±Ç°³Ö²Ö: {current_holdings}')
 
-	if signal == 'SELL':
-		for s, vol in current_holdings.items():
-			msg = f'SELLĞÅºÅ Çå²Ö {s}'
-			print(f'[µ÷²Ö] {msg}')
+	acc_info = get_trade_detail_data(g.account, g.acct_type, 'account')
+	if not acc_info:
+		print('[µ÷²Ö] ÎŞ·¨»ñÈ¡ÕË»§ĞÅÏ¢')
+		return
+	total_asset = float(acc_info[0].m_dAvailable)
+	for s, vol in current_holdings.items():
+		total_asset += get_open_price(C, s, bar_date, pos) * vol
+
+	# ---------- Âô³ö ----------
+	buys = []
+	for group, (stock, signal) in decisions.items():
+		name = BOARD_NAMES.get(group, group)
+		group_holdings = {s: v for s, v in current_holdings.items() if board_of(s) == group}
+
+		if signal == 'SELL':
+			for s, vol in group_holdings.items():
+				msg = f'SELLĞÅºÅ Çå²Ö {s}'
+				print(f'[µ÷²Ö][{name}] {msg}')
+				passorder(24, 1101, g.account, s, 11, get_open_price(C, s, bar_date, pos), vol,
+						  STRATEGY_NAME, 1, msg, C)
+			continue
+
+		# BUY / KEEP£ºÒÑÊÇÄ¿±ê¹ÉÔò³ÖÓĞ
+		if group_holdings.get(stock, 0) > 0:
+			print(f'[µ÷²Ö][{name}] KEEP: ¼ÌĞø³ÖÓĞ {stock}')
+			continue
+
+		# »»²Ö£ºÏÈÂô¾É
+		for s, vol in group_holdings.items():
+			msg = f'ÇĞ»»±êµÄ Âô³ö {s}'
+			print(f'[µ÷²Ö][{name}] {msg}')
 			passorder(24, 1101, g.account, s, 11, get_open_price(C, s, bar_date, pos), vol,
 					  STRATEGY_NAME, 1, msg, C)
+		buys.append((group, stock))
+
+	if not buys:
 		return
 
-	# BUY / KEEP£ºÒÑÊÇÄ¿±ê¹ÉÔò³ÖÓĞ
-	if current_holdings.get(stock, 0) > 0:
-		print(f'[µ÷²Ö] KEEP: ¼ÌĞø³ÖÓĞ {stock}')
-		return
-
-	# »»²Ö£ºÏÈÂô¾É
-	for s, vol in current_holdings.items():
-		msg = f'ÇĞ»»±êµÄ Âô³ö {s}'
-		print(f'[µ÷²Ö] {msg}')
-		passorder(24, 1101, g.account, s, 11, get_open_price(C, s, bar_date, pos), vol,
-				  STRATEGY_NAME, 1, msg, C)
-
+	# ---------- ÂòÈë ----------
 	acc_info = get_trade_detail_data(g.account, g.acct_type, 'account')
 	if not acc_info:
 		print('[µ÷²Ö] ÎŞ·¨»ñÈ¡ÕË»§ĞÅÏ¢')
 		return
 	available_cash = int(acc_info[0].m_dAvailable)
 
-	current_price, limit_up, limit_down, low_price = get_price_and_limits(stock, pos)
-	if current_price <= 0:
-		print(f'[µ÷²Ö] {stock} ¼Û¸ñÒì³£: {current_price}')
-		return
+	for group, stock in buys:
+		name = BOARD_NAMES.get(group, group)
+		budget = min(total_asset * BOARD_GROUPS[group], available_cash)
 
-	buy_vol = int(available_cash / current_price / 100) * 100
-	if buy_vol < 100:
-		print(f'[µ÷²Ö] ×Ê½ğ²»×ãÂò1ÊÖ£¬¿ÉÓÃ:{available_cash} ¹É¼Û:{current_price}')
-		return
+		current_price, limit_up, limit_down, low_price = get_price_and_limits(stock, pos)
+		if current_price <= 0:
+			print(f'[µ÷²Ö][{name}] {stock} ¼Û¸ñÒì³£: {current_price}')
+			continue
 
-	if low_price >= limit_up:
-		print('¿ªÅÌÕÇÍ££¬ÎŞ·¨ÂòÈë')
-		return
+		buy_vol = int(budget / current_price / 100) * 100
+		if buy_vol < 100:
+			print(f'[µ÷²Ö][{name}] ×Ê½ğ²»×ãÂò1ÊÖ£¬Ô¤Ëã:{budget:.0f} ¹É¼Û:{current_price}')
+			continue
 
-	msg = f'BUYĞÅºÅ ÂòÈë {stock} {buy_vol}¹É'
-	print(f'[µ÷²Ö] {msg}')
-	passorder(23, 1101, g.account, stock, 11, current_price, buy_vol,
-			  STRATEGY_NAME, 1, msg, C)
+		if low_price >= limit_up:
+			print(f'[µ÷²Ö][{name}] {stock} ¿ªÅÌÕÇÍ££¬ÎŞ·¨ÂòÈë')
+			continue
+
+		msg = f'BUYĞÅºÅ ÂòÈë {stock} {buy_vol}¹É'
+		print(f'[µ÷²Ö][{name}] {msg}')
+		passorder(23, 1101, g.account, stock, 11, current_price, buy_vol,
+				  STRATEGY_NAME, 1, msg, C)
+		available_cash -= buy_vol * current_price
 
 
 # ============================================================
