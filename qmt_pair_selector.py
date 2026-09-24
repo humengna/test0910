@@ -21,6 +21,7 @@
 """
 import math
 import os
+import time
 import itertools
 
 import numpy as np
@@ -111,17 +112,16 @@ def adf_tstat(u):
         X = np.column_stack([u[-n - 1:-1]] + [dl[:, j] for j in range(1, lag + 1)])
         return y, X
 
-    # AIC 选阶（所有阶数用同一样本）
+    # AIC 选阶（所有阶数用同一样本）。各阶模型是嵌套的，对 X'X 做一次
+    # Cholesky 分解即可得到每一阶的残差平方和，不必逐阶回归
     y_full, X_full = design(maxlag)
     n = len(y_full)
-    best_aic, best_lag = np.inf, 0
-    for k in range(1, maxlag + 2):
-        _, r = _ols(y_full, X_full[:, :k])
-        ssr = r.dot(r)
-        llf = -n / 2.0 * (math.log(2 * math.pi) + math.log(ssr / n) + 1)
-        aic = -2 * llf + 2 * k
-        if aic < best_aic:
-            best_aic, best_lag = aic, k - 1
+    L = np.linalg.cholesky(X_full.T.dot(X_full))
+    qy = np.linalg.solve(L, X_full.T.dot(y_full))
+    ssr = np.maximum(y_full.dot(y_full) - np.cumsum(qy ** 2), 1e-300)
+    k = np.arange(1, maxlag + 2)
+    aic = n * (math.log(2 * math.pi) + np.log(ssr / n) + 1) + 2 * k
+    best_lag = int(np.argmin(aic))
     # 用选定阶数重新回归
     y, X = design(best_lag)
     coef, r = _ols(y, X)
@@ -172,28 +172,76 @@ def dynamic_scale(adj, raw):
     return adj * (raw[-1] / adj[-1])
 
 
+def _cumsum(x):
+    """前缀和（缺失值按 0 计），以及缺失值个数的前缀和"""
+    ok = np.isfinite(x)
+    return (np.concatenate([[0.0], np.cumsum(np.where(ok, x, 0.0))]),
+            np.concatenate([[0], np.cumsum(~ok)]))
+
+
+def rolling_z(c1, c2, r1, r2, beta, start_i, end_i, window):
+    """向量化计算每天的 z-score（窗口 [t-window, t-1]，动态前复权缩放），
+    与逐日循环 dynamic_scale + std 的结果相同"""
+    t = np.arange(start_i, end_i)
+    lo, hi = t - window, t
+    # 去均值后再累加，减少大数相减的精度损失
+    m1, m2 = np.nanmean(c1), np.nanmean(c2)
+    a, b = c1 - m1, c2 - m2
+
+    def wsum(x):
+        cs, bad = _cumsum(x)
+        return cs[hi] - cs[lo], bad[hi] - bad[lo]
+
+    sa, na = wsum(a)
+    sb, nb = wsum(b)
+    saa, _ = wsum(a * a)
+    sbb, _ = wsum(b * b)
+    sab, _ = wsum(a * b)
+    ea, eb = sa / window, sb / window
+    var_a = saa / window - ea ** 2
+    var_b = sbb / window - eb ** 2
+    cov = sab / window - ea * eb
+    # 每个窗口的缩放系数：最后一天真实价 / 前复权价（无效时为 1）
+    last1, last2 = c1[hi - 1], c2[hi - 1]
+    k1 = r1[hi - 1] / last1
+    k2 = r2[hi - 1] / last2
+    k1 = np.where((r1[hi - 1] > 0) & (last1 > 0), k1, 1.0)
+    k2 = np.where((r2[hi - 1] > 0) & (last2 > 0), k2, 1.0)
+    mean = k2 * (eb + m2) - beta * k1 * (ea + m1)
+    var = k2 ** 2 * var_b + (beta * k1) ** 2 * var_a - 2 * beta * k1 * k2 * cov
+    last = k2 * last2 - beta * k1 * last1
+    with np.errstate(invalid='ignore', divide='ignore'):
+        sd = np.sqrt(np.maximum(var, 0))
+        z = (last - mean) / sd
+    bad = (na > 0) | (nb > 0) | ~(sd > 1e-12 * (np.abs(mean) + 1)) | ~np.isfinite(z)
+    z[bad] = np.nan
+    return z
+
+
 def simulate(c1, c2, o1, o2, r1, r2, beta, start_i, end_i, window, fee, p=0.5, q=0.5):
     state = 'empty'
     w1 = w2 = 0.0
     equity, nav, trades = 1.0, [], 0
     start_i = max(start_i, window)
-    for t in range(start_i, end_i):
-        if t > start_i:
-            g1 = o1[t] / o1[t - 1] - 1
-            g2 = o2[t] / o2[t - 1] - 1
-            g1 = g1 if np.isfinite(g1) else 0.0
-            g2 = g2 if np.isfinite(g2) else 0.0
+    if end_i <= start_i:
+        return np.array(nav), trades
+    zs = rolling_z(c1, c2, r1, r2, beta, start_i, end_i, window)
+    with np.errstate(invalid='ignore', divide='ignore'):
+        g1s = o1[start_i:end_i] / o1[start_i - 1:end_i - 1] - 1
+        g2s = o2[start_i:end_i] / o2[start_i - 1:end_i - 1] - 1
+    g1s = np.where(np.isfinite(g1s), g1s, 0.0).tolist()
+    g2s = np.where(np.isfinite(g2s), g2s, 0.0).tolist()
+    zs = zs.tolist()
+    for i in range(end_i - start_i):
+        if i > 0:
+            g1, g2 = g1s[i], g2s[i]
             growth = 1 + w1 * g1 + w2 * g2
             if growth > 0:
                 w1, w2 = w1 * (1 + g1) / growth, w2 * (1 + g2) / growth
             equity *= growth
-        a = dynamic_scale(c1[t - window:t], r1[t - window:t])
-        b = dynamic_scale(c2[t - window:t], r2[t - window:t])
-        spread = b - beta * a
-        sd = spread.std()
+        z = zs[i]
         target = None
-        if sd > 0 and np.isfinite(sd):
-            z = (spread[-1] - spread.mean()) / sd
+        if z == z:  # 非 NaN
             if z > 1:
                 target, state = (1.0, 0.0), 'buy1'
             elif z < -1:
@@ -300,8 +348,10 @@ def run(ContextInfo):
     if not codes:
         print('股票池为空：请检查板块名称 %s 或填写 g.codes' % g.sector)
         return
+    t0 = time.time()
     print('股票池 %d 只，读取数据 ...' % len(codes))
     data = load_data(ContextInfo, codes)
+    print('读取数据用时 %.1f 秒' % (time.time() - t0))
     close = data['close']
     if close.empty:
         print('没有读到行情，请先在「数据管理」下载日线和除权数据，或把 g.download 设为 True')
@@ -341,19 +391,29 @@ def run(ContextInfo):
         if m.any():
             oos_i = np.where(m)[0]
 
-    def arr(frame, c):
-        return frame[c].ffill().values.astype(float)
+    # 预先把数据转成 numpy 数组，循环里不再用 pandas 切片（很慢）
+    col = dict((c, i) for i, c in enumerate(keep))
+    full_c = close[keep].ffill().values.astype(float)
+    full_o = data['open'][keep].ffill().values.astype(float)
+    full_r = data['raw'][keep].ffill().values.astype(float)
+    ins_c = close.loc[ins, keep].ffill().values.astype(float)
+    ins_r = data['raw'].loc[ins, keep].ffill().values.astype(float)
+    oos_c = close[keep].iloc[oos_i].ffill().values.astype(float) if oos_i is not None else None
+    t_pairs = time.time()
 
     rows = []
     for n, (a, b) in enumerate(cands, 1):
-        if n % 200 == 0:
-            print('  %d / %d' % (n, len(cands)))
-        sub = pd.DataFrame({'a': close.loc[ins, a], 'b': close.loc[ins, b],
-                            'ra': data['raw'].loc[ins, a], 'rb': data['raw'].loc[ins, b]}).ffill().dropna()
-        if len(sub) < g.window + 20:
+        if n % 500 == 0:
+            el = time.time() - t_pairs
+            print('  %d / %d，已用 %.0f 秒，预计还需 %.0f 秒'
+                  % (n, len(cands), el, el / n * (len(cands) - n)))
+        ia, ib = col[a], col[b]
+        ca, cb, ra, rb = ins_c[:, ia], ins_c[:, ib], ins_r[:, ia], ins_r[:, ib]
+        m = np.isfinite(ca) & np.isfinite(cb) & np.isfinite(ra) & np.isfinite(rb)
+        if m.sum() < g.window + 20:
             continue
-        pa = dynamic_scale(sub['a'].values, sub['ra'].values)
-        pb = dynamic_scale(sub['b'].values, sub['rb'].values)
+        pa = dynamic_scale(ca[m], ra[m])
+        pb = dynamic_scale(cb[m], rb[m])
 
         best = None
         for s1, s2, x, y in ((a, b, pa, pb), (b, a, pb, pa)):
@@ -375,9 +435,10 @@ def run(ContextInfo):
         if stable < g.min_stable:
             continue
 
-        c1, c2 = arr(close, s1), arr(close, s2)
-        o1, o2 = arr(data['open'], s1), arr(data['open'], s2)
-        r1, r2 = arr(data['raw'], s1), arr(data['raw'], s2)
+        i1, i2 = col[s1], col[s2]
+        c1, c2 = full_c[:, i1], full_c[:, i2]
+        o1, o2 = full_o[:, i1], full_o[:, i2]
+        r1, r2 = full_r[:, i1], full_r[:, i2]
         nav, trades = simulate(c1, c2, o1, o2, r1, r2, beta,
                                ins_i[0], ins_i[-1] + 1, g.window, g.fee)
         tot, ann, mdd = perf(nav)
@@ -392,13 +453,15 @@ def run(ContextInfo):
             nav, trades = simulate(c1, c2, o1, o2, r1, r2, beta,
                                    oos_i[0], oos_i[-1] + 1, g.window, g.fee)
             tot, ann, mdd = perf(nav)
-            o = pd.DataFrame({'x': close[s1].iloc[oos_i], 'y': close[s2].iloc[oos_i]}).ffill().dropna()
-            oos_p = coint_test(o['y'].values, o['x'].values)[0] if len(o) > 30 else np.nan
+            ox, oy = oos_c[:, i1], oos_c[:, i2]
+            om = np.isfinite(ox) & np.isfinite(oy)
+            oos_p = coint_test(oy[om], ox[om])[0] if om.sum() > 30 else np.nan
             bench = bench_annual(o1, o2, oos_i[0], oos_i[-1] + 1, g.window)
             row.update({'oos_pvalue': oos_p, 'oos_return': tot, 'oos_annual': ann,
                         'oos_maxdd': mdd, 'oos_trades': trades,
                         'oos_bench_annual': bench, 'oos_excess': ann - bench})
         rows.append(row)
+    print('协整检验和回测用时 %.1f 秒，总用时 %.1f 秒' % (time.time() - t_pairs, time.time() - t0))
 
     if not rows:
         print('没有满足条件的组合，可放宽 g.min_corr / g.max_pvalue / g.max_half_life')
