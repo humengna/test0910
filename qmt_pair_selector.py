@@ -53,6 +53,8 @@ def set_params():
     g.max_half_life = 60
     g.min_amount = 5e7                # 样本内日均成交额下限（元）
     g.max_missing = 0.05              # 允许的缺失/停牌比例
+    g.stable_parts = 3                # 稳定性检验：样本内分成几段分别做协整检验
+    g.min_stable = 2                  # 至少几段协整（p<0.1）才保留，0 表示不过滤
     g.top = 20                        # 日志里打印前 N 个
     # 下载数据：True 时运行前自动补下载日线（股票多时较慢，已下载可改 False）
     g.download = False
@@ -217,6 +219,30 @@ def perf(nav):
     return total, annual, mdd
 
 
+def bench_annual(o1, o2, start_i, end_i, window):
+    """同期两只股票各 50% 买入持有不动的年化收益，作为对比基准"""
+    s = max(start_i, window)
+    a, b = o1[s:end_i], o2[s:end_i]
+    if len(a) < 2 or not (a[0] > 0 and b[0] > 0):
+        return np.nan
+    return perf(0.5 * a / a[0] + 0.5 * b / b[0])[1]
+
+
+def stability(x, y, parts):
+    """把样本等分成 parts 段，各段单独做协整检验，返回 p<0.1 的段数。
+    跨行业组合容易是某一段行情造成的巧合，分段都协整才说明关系稳定"""
+    n = len(x) // parts
+    cnt = 0
+    for k in range(parts):
+        xs, ys = x[k * n:(k + 1) * n], y[k * n:(k + 1) * n]
+        try:
+            if len(xs) > 60 and coint_test(ys, xs)[0] < 0.1:
+                cnt += 1
+        except Exception:
+            pass
+    return cnt
+
+
 # ============================================================
 # 数据读取
 # ============================================================
@@ -345,6 +371,9 @@ def run(ContextInfo):
         hl = half_life(resid)
         if not (g.min_half_life <= hl <= g.max_half_life):
             continue
+        stable = stability(x, y, g.stable_parts)
+        if stable < g.min_stable:
+            continue
 
         c1, c2 = arr(close, s1), arr(close, s2)
         o1, o2 = arr(data['open'], s1), arr(data['open'], s2)
@@ -352,25 +381,31 @@ def run(ContextInfo):
         nav, trades = simulate(c1, c2, o1, o2, r1, r2, beta,
                                ins_i[0], ins_i[-1] + 1, g.window, g.fee)
         tot, ann, mdd = perf(nav)
+        bench = bench_annual(o1, o2, ins_i[0], ins_i[-1] + 1, g.window)
         row = {'security1': s1, 'security2': s2, 'pvalue': pval, 'beta': beta, 'alpha': alpha,
-               'half_life': hl, 'corr': corr.at[a, b],
+               'half_life': hl, 'corr': corr.at[a, b], 'stable_parts': stable,
                'spread_sigma_pct': resid.std() / y.mean(),
-               'ins_return': tot, 'ins_annual': ann, 'ins_maxdd': mdd, 'ins_trades': trades}
+               'ins_return': tot, 'ins_annual': ann, 'ins_maxdd': mdd, 'ins_trades': trades,
+               # 超额 = 策略年化 - 两只股票各半持有不动的年化，衡量配对本身贡献
+               'ins_bench_annual': bench, 'ins_excess': ann - bench}
         if oos_i is not None:
             nav, trades = simulate(c1, c2, o1, o2, r1, r2, beta,
                                    oos_i[0], oos_i[-1] + 1, g.window, g.fee)
             tot, ann, mdd = perf(nav)
             o = pd.DataFrame({'x': close[s1].iloc[oos_i], 'y': close[s2].iloc[oos_i]}).ffill().dropna()
             oos_p = coint_test(o['y'].values, o['x'].values)[0] if len(o) > 30 else np.nan
+            bench = bench_annual(o1, o2, oos_i[0], oos_i[-1] + 1, g.window)
             row.update({'oos_pvalue': oos_p, 'oos_return': tot, 'oos_annual': ann,
-                        'oos_maxdd': mdd, 'oos_trades': trades})
+                        'oos_maxdd': mdd, 'oos_trades': trades,
+                        'oos_bench_annual': bench, 'oos_excess': ann - bench})
         rows.append(row)
 
     if not rows:
         print('没有满足条件的组合，可放宽 g.min_corr / g.max_pvalue / g.max_half_life')
         return
 
-    res = pd.DataFrame(rows).sort_values(['pvalue', 'half_life']).reset_index(drop=True)
+    res = pd.DataFrame(rows).sort_values(['stable_parts', 'pvalue'],
+                                         ascending=[False, True]).reset_index(drop=True)
     try:
         res.to_csv(g.out_file, index=False, encoding='gbk')
         print('共 %d 个组合，已保存到 %s' % (len(res), g.out_file))
@@ -378,14 +413,16 @@ def run(ContextInfo):
         print('保存文件失败（%s），只在日志中输出' % e)
 
     for i, r in res.head(g.top).iterrows():
-        line = ('%2d. %s / %s  p=%.4f beta=%.4f 半衰期=%.1f天 相关=%.2f 价差1σ=%.1f%% | '
-                '样本内 收益%.1f%% 回撤%.1f%% %d次'
-                % (i + 1, r['security1'], r['security2'], r['pvalue'], r['beta'], r['half_life'],
-                   r['corr'], r['spread_sigma_pct'] * 100, r['ins_return'] * 100,
+        line = ('%2d. %s / %s  p=%.4f 稳定%d/%d beta=%.4f 半衰期=%.1f天 相关=%.2f 价差1σ=%.1f%% | '
+                '样本内 年化%.1f%% 超额%.1f%% 回撤%.1f%% %d次'
+                % (i + 1, r['security1'], r['security2'], r['pvalue'], r['stable_parts'],
+                   g.stable_parts, r['beta'], r['half_life'], r['corr'],
+                   r['spread_sigma_pct'] * 100, r['ins_annual'] * 100, r['ins_excess'] * 100,
                    r['ins_maxdd'] * 100, r['ins_trades']))
         if 'oos_return' in r:
-            line += (' | 样本外 p=%.4f 收益%.1f%% 回撤%.1f%% %d次'
-                     % (r['oos_pvalue'], r['oos_return'] * 100, r['oos_maxdd'] * 100, r['oos_trades']))
+            line += (' | 样本外 p=%.4f 年化%.1f%% 超额%.1f%% 回撤%.1f%% %d次'
+                     % (r['oos_pvalue'], r['oos_annual'] * 100, r['oos_excess'] * 100,
+                        r['oos_maxdd'] * 100, r['oos_trades']))
         print(line)
 
     top = res.iloc[0]

@@ -218,6 +218,30 @@ def perf(nav):
     return total, annual, mdd
 
 
+def bench_annual(o1, o2, start_i, end_i, window):
+    """同期两只股票各 50% 买入持有不动的年化收益，作为对比基准"""
+    s = max(start_i, window)
+    a, b = o1[s:end_i], o2[s:end_i]
+    if len(a) < 2 or not (a[0] > 0 and b[0] > 0):
+        return np.nan
+    return perf(0.5 * a / a[0] + 0.5 * b / b[0])[1]
+
+
+def stability(x, y, parts):
+    """把样本等分成 parts 段，各段单独做协整检验，返回 p<0.1 的段数。
+    跨行业组合容易是某一段行情造成的巧合，分段都协整才说明关系稳定"""
+    n = len(x) // parts
+    cnt = 0
+    for k in range(parts):
+        xs, ys = x[k * n:(k + 1) * n], y[k * n:(k + 1) * n]
+        try:
+            if len(xs) > 60 and coint(ys, xs)[1] < 0.1:
+                cnt += 1
+        except Exception:
+            pass
+    return cnt
+
+
 # ============================================================
 def main():
     ap = argparse.ArgumentParser(description='配对交易选股（协整检验 + 规则回测）')
@@ -238,6 +262,8 @@ def main():
     ap.add_argument('--max-missing', type=float, default=0.05, help='允许的缺失/停牌天数比例')
     ap.add_argument('--same-industry', action='store_true', help='只在同行业内配对（需要行业数据）')
     ap.add_argument('--fee', type=float, default=0.001, help='模拟回测单边换手费率')
+    ap.add_argument('--stable-parts', type=int, default=3, help='稳定性检验：样本内分成几段')
+    ap.add_argument('--min-stable', type=int, default=2, help='至少几段协整（p<0.1）才保留，0 不过滤')
     ap.add_argument('--top', type=int, default=20, help='打印前 N 个组合')
     ap.add_argument('--out', default='pair_candidates.csv', help='结果输出文件')
     args = ap.parse_args()
@@ -344,6 +370,9 @@ def main():
         hl = half_life(resid)
         if not (args.min_half_life <= hl <= args.max_half_life):
             continue
+        stable = stability(x, y, args.stable_parts)
+        if stable < args.min_stable:
+            continue
 
         c1, c2 = arr(close, s1), arr(close, s2)
         o1, o2 = arr(data['open'], s1), arr(data['open'], s2)
@@ -352,14 +381,17 @@ def main():
         nav, trades = simulate(c1, c2, o1, o2, r1, r2, beta,
                                ins_i[0], ins_i[-1] + 1, args.window, fee=args.fee)
         tot, ann, mdd = perf(nav)
+        bench = bench_annual(o1, o2, ins_i[0], ins_i[-1] + 1, args.window)
         row = {
             'security1': s1, 'security2': s2,
             'pvalue': pval, 'beta': beta, 'alpha': alpha,
-            'half_life': hl, 'corr': corr.at[a, b],
+            'half_life': hl, 'corr': corr.at[a, b], 'stable_parts': stable,
             # 1 个标准差价差占股票2价格的比例：太小则赚不够手续费
             'spread_sigma_pct': resid.std() / y.mean(),
             'price1': x[-1], 'price2': y[-1],
             'ins_return': tot, 'ins_annual': ann, 'ins_maxdd': mdd, 'ins_trades': trades,
+            # 超额 = 策略年化 - 两只股票各半持有不动的年化，衡量配对本身贡献
+            'ins_bench_annual': bench, 'ins_excess': ann - bench,
         }
         if oos_mask is not None and oos_mask.any():
             oi = np.where(oos_mask)[0]
@@ -374,20 +406,23 @@ def main():
                 oos_p = coint(oy[cm].values, ox[cm].values)[1] if len(cm) > 30 else np.nan
             except Exception:
                 oos_p = np.nan
+            bench = bench_annual(o1, o2, oi[0], oi[-1] + 1, args.window)
             row.update({'oos_pvalue': oos_p, 'oos_return': tot, 'oos_annual': ann,
-                        'oos_maxdd': mdd, 'oos_trades': trades})
+                        'oos_maxdd': mdd, 'oos_trades': trades,
+                        'oos_bench_annual': bench, 'oos_excess': ann - bench})
         rows.append(row)
 
     if not rows:
         sys.exit('没有找到满足条件的组合，可放宽 --min-corr / --max-pvalue / --max-half-life')
 
-    res = pd.DataFrame(rows).sort_values(['pvalue', 'half_life']).reset_index(drop=True)
+    res = pd.DataFrame(rows).sort_values(['stable_parts', 'pvalue'],
+                                         ascending=[False, True]).reset_index(drop=True)
     res.to_csv(args.out, index=False, encoding='utf-8-sig')
 
     pd.set_option('display.width', 200)
     pd.set_option('display.max_columns', 30)
     show = res.head(args.top).copy()
-    fmt_pct = [c for c in show.columns if c.endswith(('return', 'annual', 'maxdd', 'sigma_pct'))]
+    fmt_pct = [c for c in show.columns if c.endswith(('return', 'annual', 'maxdd', 'sigma_pct', 'excess'))]
     for c in fmt_pct:
         show[c] = show[c].map(lambda v: '' if pd.isna(v) else '%.1f%%' % (v * 100))
     for c in ['pvalue', 'oos_pvalue']:
