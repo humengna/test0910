@@ -271,9 +271,14 @@ def bench_annual(o1, o2, start_i, end_i, window):
     """同期两只股票各 50% 买入持有不动的年化收益，作为对比基准"""
     s = max(start_i, window)
     a, b = o1[s:end_i], o2[s:end_i]
-    if len(a) < 2 or not (a[0] > 0 and b[0] > 0):
+    # 期初有股票还没上市/没有价格时，从两只都有价格的第一天开始买入，之前视为持币
+    ok = np.where((a > 0) & (b > 0))[0]
+    if len(a) < 2 or len(ok) == 0:
         return np.nan
-    return perf(0.5 * a / a[0] + 0.5 * b / b[0])[1]
+    j = ok[0]
+    nav = np.ones(len(a))
+    nav[j:] = 0.5 * a[j:] / a[j] + 0.5 * b[j:] / b[j]
+    return perf(nav)[1]
 
 
 def stability(x, y, parts):
