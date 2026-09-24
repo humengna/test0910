@@ -69,12 +69,14 @@ STOP_LOSS_RATIO = -0.15
 # 板块分组：每组独立选股、独立择时、独立持仓，值为该组资金占比
 #   'main'     主板（沪市 60xxxx、深市 000/001/002/003）
 #   'gem_star' 创业板（300/301）+ 科创板（688/689）
+#   'all'      不分板块，全部股票一起排名（与分板块前的逻辑一致）
+# 不分开：BOARD_GROUPS = {'all': 1.0}
 # 只回测某一个板块：只保留一项并设为 1.0，例如 BOARD_GROUPS = {'main': 1.0}
 BOARD_GROUPS = {
 	'main': 0.5,
 	'gem_star': 0.5,
 }
-BOARD_NAMES = {'main': '主板', 'gem_star': '创业板+科创板'}
+BOARD_NAMES = {'main': '主板', 'gem_star': '创业板+科创板', 'all': '全部'}
 
 # 预加载时在回测起点之前多取的自然日（需覆盖 LOOKBACK_DAYS + 10 根以上的交易日）
 PRELOAD_BUFFER_DAYS = 90
@@ -294,7 +296,8 @@ def preload_all(C, bar_date):
 
 	# ---------- 板块归属 ----------
 	boards = np.array([board_of(s) for s in stocks])
-	g.board_mask = {grp: boards == grp for grp in BOARD_GROUPS}
+	g.board_mask = {grp: (np.ones(len(stocks), dtype=bool) if grp == 'all' else boards == grp)
+					for grp in BOARD_GROUPS}
 
 	# ---------- RSRS 全序列 ----------
 	g.rsrs = precompute_rsrs(C, end_time)
@@ -430,6 +433,10 @@ def board_of(stock):
 	if code.startswith(('60', '000', '001', '002', '003')):
 		return 'main'
 	return 'other'
+
+
+def in_group(stock, group):
+	return group == 'all' or board_of(stock) == group
 
 
 def get_limit_ratio(stock):
@@ -733,7 +740,7 @@ def adjust_position(decisions, C, bar_date, pos):
 	buys = []
 	for group, (stock, signal) in decisions.items():
 		name = BOARD_NAMES.get(group, group)
-		group_holdings = {s: v for s, v in current_holdings.items() if board_of(s) == group}
+		group_holdings = {s: v for s, v in current_holdings.items() if in_group(s, group)}
 
 		if signal == 'SELL':
 			for s, vol in group_holdings.items():
