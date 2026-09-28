@@ -88,6 +88,7 @@ def init(ContextInfo):
     except Exception:
         pass
     g.data = None          # 行情缓存
+    g.load_start = None    # 读取行情的起始日期
     g.hubs = []            # 候选中心股：dict(h, ih, partners=[dict(code, i, beta, p)], avg_p)
     g.last_select_date = None
     g.meta = {}            # 持仓信息：code -> dict(hub, side, partner, entry_px, entry_date)
@@ -173,14 +174,13 @@ def half_life(resid):
 # ============================================================
 # 数据
 # ============================================================
-def load_data(ContextInfo, end):
+def load_data(ContextInfo, start, end):
     """一次性读取股票池全部历史，之后按日期序号切片（只用当天之前的行）"""
     codes = list(g.codes) or ContextInfo.get_stock_list_in_sector(g.sector)
     if not codes:
         print('股票池为空：请检查板块名称 %s 或填写 g.codes' % g.sector)
         return None
     t0 = time.time()
-    start = '20000101'
 
     def wide(fields, dividend_type, cs):
         res = ContextInfo.get_market_data_ex(fields, cs, period='1d', start_time=start,
@@ -239,7 +239,11 @@ def ensure_data(ContextInfo, today):
     """回测：读一次到最新；实盘：当天不在缓存里就重新读"""
     if g.data is None or today not in g.data['idx']:
         end = pd.Timestamp.today().strftime('%Y%m%d') if ContextInfo.do_back_test else today
-        g.data = load_data(ContextInfo, end)
+        if g.load_start is None:
+            # 只读需要的历史：第一次运行日（回测开始日）往前 选股期 + z 窗口，按自然日放宽
+            days = int((g.formation_days + g.window + 20) * 1.6)
+            g.load_start = (pd.Timestamp(today) - pd.Timedelta(days=days)).strftime('%Y%m%d')
+        g.data = load_data(ContextInfo, g.load_start, end)
         if g.data is not None:
             remap()
     return g.data is not None and today in g.data['idx']
