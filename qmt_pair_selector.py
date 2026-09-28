@@ -9,7 +9,7 @@
   - 数据通过 ContextInfo.get_market_data_ex 读取本地行情
 
 需要的数据（先在 QMT「数据管理」里下载）：
-  - 股票池内所有股票的「日线」行情，时间覆盖 start 往前约半年 到 oos_end（或今天）
+  - 股票池内所有股票的「日线」行情，时间覆盖 start 往前约 g.window 个交易日 到 oos_end（或今天）
   - 「除权数据」（用于前复权）
   用到的字段：开盘价、收盘价（前复权）、收盘价（不复权）、成交量、成交额、股票名称（判断 ST）
 
@@ -18,6 +18,8 @@
   2. 修改 set_params() 里的股票池和日期
   3. 主图任选一只股票、周期选「日线」，点「运行」（不需要回测）
   4. 结果打印在日志里，并保存到 g.out_file
+  5. 一对多分析：和多只股票同时协整的「中心股」，按综合 z 值 + 一致数规则回测，
+     与它的单对配对结果比较，保存到 g.hub_out_file
 """
 import math
 import os
@@ -57,11 +59,16 @@ def set_params():
     g.stable_parts = 3                # 稳定性检验：样本内分成几段分别做协整检验
     g.min_stable = 2                  # 至少几段协整（p<0.1）才保留，0 表示不过滤
     g.top = 20                        # 日志里打印前 N 个
+    # ---- 一对多（中心股）分析 ----
+    g.hub_min_partners = 3            # 和至少几只股票协整才算中心股，0 表示不做
+    g.hub_max_partners = 5            # 每个中心股最多用几只伙伴股（按 p 值取最好的）
+    g.hub_min_agree = 2               # 至少几对同方向发出信号才交易
     # 下载数据：True 时运行前自动补下载日线（股票多时较慢，已下载可改 False）
     g.download = False
     desktop = os.path.join(os.path.expanduser('~'), 'Desktop')
     g.out_file = os.path.join(desktop if os.path.isdir(desktop) else os.path.expanduser('~'),
                               'pair_candidates.csv')
+    g.hub_out_file = os.path.join(os.path.dirname(g.out_file), 'hub_candidates.csv')
 
 
 def init(ContextInfo):
@@ -279,6 +286,147 @@ def bench_annual(o1, o2, start_i, end_i, window):
     nav = np.ones(len(a))
     nav[j:] = 0.5 * a[j:] / a[j] + 0.5 * b[j:] / b[j]
     return perf(nav)[1]
+
+
+def simulate_basket(hub, partners, start_i, end_i, window, fee, min_agree):
+    """
+    一对多规则回测。hub / partners 里每项为 dict(c, o, r[, beta])，
+    第 i 对价差 = 中心股 - beta_i * 伙伴股_i，z_i 为其 z 值，综合 z = 各 z_i 的平均：
+      综合 z < -1 且至少 min_agree 对 z_i < -1   -> 全仓中心股（相对整个篮子便宜）
+      综合 z >  1 且至少 min_agree 对 z_i >  1   -> 全仓 z_i 最大的伙伴股（相对中心股最便宜）
+      全仓中心股时综合 z 回到 >= 0，或全仓伙伴股时回到 <= 0 -> 中心股 50%、伙伴股平分 50%
+      其他情况不动
+    返回 (净值序列, 调仓次数)
+    """
+    n = len(partners)
+    start_i = max(start_i, window)
+    if end_i <= start_i:
+        return np.array([]), 0
+    zs = np.array([rolling_z(pt['c'], hub['c'], pt['r'], hub['r'], pt['beta'],
+                             start_i, end_i, window) for pt in partners])
+    opens = np.vstack([hub['o']] + [pt['o'] for pt in partners])
+    with np.errstate(invalid='ignore', divide='ignore'):
+        gr = opens[:, start_i:end_i] / opens[:, start_i - 1:end_i - 1] - 1
+    gr = np.where(np.isfinite(gr), gr, 0.0)
+    even = np.array([0.5] + [0.5 / n] * n)
+    w = np.zeros(n + 1)
+    state, equity, nav, trades = 'empty', 1.0, [], 0
+    for i in range(end_i - start_i):
+        if i > 0:
+            growth = 1 + w.dot(gr[:, i])
+            if growth > 0:
+                w = w * (1 + gr[:, i]) / growth
+            equity *= growth
+        z = zs[:, i]
+        ok = np.isfinite(z)
+        target = None
+        if ok.sum() >= min_agree:
+            zbar = z[ok].mean()
+            if zbar < -1 and (z[ok] < -1).sum() >= min_agree:
+                target, state = np.eye(n + 1)[0], 'hub'
+            elif zbar > 1 and (z[ok] > 1).sum() >= min_agree:
+                k = int(np.nanargmax(z)) + 1
+                target, state = np.eye(n + 1)[k], 'partner'
+            elif (state == 'hub' and zbar >= 0) or (state == 'partner' and zbar <= 0):
+                target, state = even, 'even'
+        if target is not None:
+            turnover = np.abs(target - w).sum()
+            if turnover > 1e-6:
+                equity *= 1 - turnover * fee
+                trades += 1
+            w = target.copy()
+        nav.append(equity)
+    return np.array(nav), trades
+
+
+def bench_basket(opens, start_i, end_i, window):
+    """中心股 50%、伙伴股平分 50%，买入持有不动的年化收益"""
+    s = max(start_i, window)
+    m = np.vstack(opens)[:, s:end_i]
+    ok = np.where((m > 0).all(axis=0))[0]
+    if m.shape[1] < 2 or len(ok) == 0:
+        return np.nan
+    j = ok[0]
+    wts = np.array([0.5] + [0.5 / (len(opens) - 1)] * (len(opens) - 1))
+    nav = np.ones(m.shape[1])
+    nav[j:] = wts.dot(m[:, j:] / m[:, j:j + 1])
+    return perf(nav)[1]
+
+
+def analyze_hubs(res, A):
+    """找出和多只股票协整的中心股，按一对多规则回测，并与它的单对结果比较"""
+    if g.hub_min_partners <= 0 or len(res) == 0:
+        return
+    t0 = time.time()
+    edges = {}
+    for _, r in res.iterrows():
+        for h, pt in ((r['security1'], r['security2']), (r['security2'], r['security1'])):
+            edges.setdefault(h, []).append((r['pvalue'], pt, r))
+    hubs = dict((h, sorted(v, key=lambda e: e[0])[:g.hub_max_partners])
+                for h, v in edges.items() if len(v) >= g.hub_min_partners)
+    if not hubs:
+        print('没有和 %d 只以上股票同时协整的中心股' % g.hub_min_partners)
+        return
+    col = A['col']
+    rows = []
+    for h, es in hubs.items():
+        ih = col[h]
+        hub = {'c': A['full_c'][:, ih], 'o': A['full_o'][:, ih], 'r': A['full_r'][:, ih]}
+        partners = []
+        for _, pt, _ in es:
+            ip = col[pt]
+            # 以中心股为因变量重新估计 beta（单对结果里中心股可能是 security1）
+            ch, cp = A['ins_c'][:, ih], A['ins_c'][:, ip]
+            rh, rp = A['ins_r'][:, ih], A['ins_r'][:, ip]
+            m = np.isfinite(ch) & np.isfinite(cp) & np.isfinite(rh) & np.isfinite(rp)
+            yv, xv = dynamic_scale(ch[m], rh[m]), dynamic_scale(cp[m], rp[m])
+            beta = _ols(yv, np.column_stack([np.ones_like(xv), xv]))[0][1]
+            partners.append({'code': pt, 'beta': beta, 'c': A['full_c'][:, ip],
+                             'o': A['full_o'][:, ip], 'r': A['full_r'][:, ip]})
+        opens = [hub['o']] + [pt['o'] for pt in partners]
+        single = [e[2] for e in es]
+        row = {'hub': h, 'n_partners': len(partners),
+               'partners': ','.join(pt['code'] for pt in partners),
+               'betas': ','.join('%.4f' % pt['beta'] for pt in partners),
+               'avg_pvalue': np.mean([e[0] for e in es])}
+        periods = [('ins', A['ins_i'])] + ([('oos', A['oos_i'])] if A['oos_i'] is not None else [])
+        for tag, ii in periods:
+            nav, trades = simulate_basket(hub, partners, ii[0], ii[-1] + 1, g.window, g.fee,
+                                          g.hub_min_agree)
+            tot, ann, mdd = perf(nav)
+            bench = bench_basket(opens, ii[0], ii[-1] + 1, g.window)
+            ex = [r[tag + '_excess'] for r in single]
+            row.update({tag + '_annual': ann, tag + '_excess': ann - bench, tag + '_maxdd': mdd,
+                        tag + '_trades': trades,
+                        # 同一中心股的单对结果：p 值最小的那对，以及所有单对的中位数
+                        tag + '_best_single_excess': ex[0],
+                        tag + '_median_single_excess': float(np.nanmedian(ex))})
+        rows.append(row)
+    hr = pd.DataFrame(rows).sort_values(['n_partners', 'avg_pvalue'],
+                                        ascending=[False, True]).reset_index(drop=True)
+    try:
+        hr.to_csv(g.hub_out_file, index=False, encoding='gbk')
+    except Exception as e:
+        print('保存中心股结果失败: %s' % e)
+    print('===== 一对多：中心股 %d 个（至少 %d 个协整伙伴），用时 %.1f 秒，已保存到 %s ====='
+          % (len(hr), g.hub_min_partners, time.time() - t0, g.hub_out_file))
+    for tag, name in (('ins', '样本内'), ('oos', '样本外')):
+        if tag + '_excess' not in hr:
+            continue
+        a, b = hr[tag + '_excess'], hr[tag + '_best_single_excess']
+        print('%s超额收益中位数：一对多 %.1f%% | 最优单对 %.1f%% | 全部单对 %.1f%% | 一对多胜过最优单对 %.0f%%'
+              % (name, a.median() * 100, b.median() * 100,
+                 hr[tag + '_median_single_excess'].median() * 100, (a > b).mean() * 100))
+    for i, r in hr.head(g.top).iterrows():
+        line = ('%2d. %s + %d 只伙伴 [%s] 平均p=%.4f | 样本内 年化%.1f%% 超额%.1f%%（最优单对%.1f%%） 回撤%.1f%% %d次'
+                % (i + 1, r['hub'], r['n_partners'], r['partners'], r['avg_pvalue'],
+                   r['ins_annual'] * 100, r['ins_excess'] * 100, r['ins_best_single_excess'] * 100,
+                   r['ins_maxdd'] * 100, r['ins_trades']))
+        if 'oos_excess' in r:
+            line += (' | 样本外 年化%.1f%% 超额%.1f%%（最优单对%.1f%%） 回撤%.1f%% %d次'
+                     % (r['oos_annual'] * 100, r['oos_excess'] * 100,
+                        r['oos_best_single_excess'] * 100, r['oos_maxdd'] * 100, r['oos_trades']))
+        print(line)
 
 
 def stability(x, y, parts):
@@ -499,3 +647,6 @@ def run(ContextInfo):
     print("g.security2 = '%s'" % top['security2'])
     print('g.regression_ratio = %.4f' % top['beta'])
     print('g.test_days = %d' % g.window)
+
+    analyze_hubs(res, {'col': col, 'full_c': full_c, 'full_o': full_o, 'full_r': full_r,
+                       'ins_c': ins_c, 'ins_r': ins_r, 'ins_i': ins_i, 'oos_i': oos_i})
